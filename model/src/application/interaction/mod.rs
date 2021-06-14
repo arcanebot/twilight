@@ -2,6 +2,7 @@
 
 pub mod application_command;
 mod interaction_type;
+mod message_component;
 mod ping;
 
 pub use self::{
@@ -9,7 +10,8 @@ pub use self::{
 };
 
 use crate::{
-    application::interaction::application_command::CommandData,
+    application::interaction::message_component::MessageComponent,
+    channel::Message,
     guild::PartialMember,
     id::{ApplicationId, ChannelId, GuildId, InteractionId},
     user::User,
@@ -34,6 +36,8 @@ pub enum Interaction {
     Ping(Box<Ping>),
     /// Application command variant.
     ApplicationCommand(Box<ApplicationCommand>),
+    /// Message component variant.
+    MessageComponent(Box<MessageComponent>),
 }
 
 impl Interaction {
@@ -41,6 +45,7 @@ impl Interaction {
         match self {
             Self::Ping(_) => None,
             Self::ApplicationCommand(inner) => inner.guild_id,
+            Self::MessageComponent(inner) => inner.guild_id,
         }
     }
 }
@@ -63,6 +68,7 @@ enum InteractionField {
     Token,
     Type,
     User,
+    Message,
 }
 
 struct InteractionVisitor;
@@ -78,13 +84,14 @@ impl<'de> Visitor<'de> for InteractionVisitor {
     fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<Self::Value, V::Error> {
         let mut application_id: Option<ApplicationId> = None;
         let mut channel_id: Option<ChannelId> = None;
-        let mut data: Option<CommandData> = None;
+        let mut data: Option<serde_value::Value> = None;
         let mut guild_id: Option<Option<GuildId>> = None;
         let mut id: Option<InteractionId> = None;
         let mut member: Option<Option<PartialMember>> = None;
         let mut token: Option<String> = None;
         let mut kind: Option<InteractionType> = None;
         let mut user: Option<Option<User>> = None;
+        let mut message: Option<Message> = None;
 
         let span = tracing::trace_span!("deserializing interaction");
         let _span_enter = span.enter();
@@ -174,6 +181,13 @@ impl<'de> Visitor<'de> for InteractionVisitor {
 
                     user = Some(map.next_value()?);
                 }
+                InteractionField::Message => {
+                    if message.is_some() {
+                        return Err(DeError::duplicate_field("message"));
+                    }
+
+                    message = Some(map.next_value()?);
+                }
             }
         }
 
@@ -204,7 +218,10 @@ impl<'de> Visitor<'de> for InteractionVisitor {
             }
             InteractionType::ApplicationCommand => {
                 let channel_id = channel_id.ok_or_else(|| DeError::missing_field("channel_id"))?;
-                let data = data.ok_or_else(|| DeError::missing_field("data"))?;
+                let data = data
+                    .ok_or_else(|| DeError::missing_field("data"))?
+                    .deserialize_into()
+                    .expect("Expected button data struct");
 
                 let guild_id = guild_id.unwrap_or_default();
                 let member = member.unwrap_or_default();
@@ -222,6 +239,27 @@ impl<'de> Visitor<'de> for InteractionVisitor {
                     member,
                     token,
                     user,
+                }))
+            }
+            InteractionType::MessageComponent => {
+                let channel_id = channel_id.ok_or_else(|| DeError::missing_field("channel_id"))?;
+                let button_data = data
+                    .ok_or_else(|| DeError::missing_field("data"))?
+                    .deserialize_into()
+                    .expect("Expected button data struct");
+
+                let guild_id = guild_id.unwrap_or_default();
+                let member = member.unwrap_or_default();
+
+                Self::Value::MessageComponent(Box::new(MessageComponent {
+                    id,
+                    channel_id,
+                    data: button_data,
+                    guild_id,
+                    kind,
+                    member,
+                    token,
+                    message,
                 }))
             }
         })
